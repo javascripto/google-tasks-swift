@@ -5,15 +5,32 @@ import PackageDescription
 
 let package = Package(
     name: "google-tasks",
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .library(name: "GoogleTasksCore", targets: ["GoogleTasksCore"]),
+        .executable(name: "google-tasks", targets: ["google-tasks"]),
+        .executable(name: "google-tasks-selftest", targets: ["google-tasks-selftest"]),
+        .executable(name: "google-tasks-icon", targets: ["google-tasks-icon"])
+    ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
-        .executableTarget(
-            name: "google-tasks"
+        .target(
+            name: "GoogleTasksCore"
         ),
-        .testTarget(
-            name: "google-tasksTests",
-            dependencies: ["google-tasks"]
+        .executableTarget(
+            name: "google-tasks",
+            dependencies: ["GoogleTasksCore"],
+            swiftSettings: [
+                .unsafeFlags(["-parse-as-library"])
+            ]
+        ),
+        .executableTarget(
+            name: "google-tasks-selftest",
+            dependencies: ["GoogleTasksCore"]
+        ),
+        .executableTarget(
+            name: "google-tasks-icon"
         ),
     ],
     swiftLanguageModes: [.v6]
