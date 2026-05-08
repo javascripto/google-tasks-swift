@@ -1,5 +1,12 @@
+import AppKit
 import GoogleTasksCore
 import SwiftUI
+import UniformTypeIdentifiers
+
+private enum ContentMode {
+    case taskList
+    case calendar
+}
 
 struct ContentView: View {
     private let pollingInterval: Duration = .seconds(30)
@@ -12,14 +19,20 @@ struct ContentView: View {
     @State private var pollingTask: Task<Void, Never>?
     @State private var isConfirmingSignOut = false
     @State private var isSearchVisible = false
+    @State private var contentMode: ContentMode = .taskList
 
     var body: some View {
         NavigationSplitView {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } content: {
-            TaskListView(selectedTask: $selectedTask, isSearchVisible: $isSearchVisible)
-                .navigationSplitViewColumnWidth(min: 360, ideal: 520)
+            if contentMode == .calendar {
+                CalendarView(selectedTask: $selectedTask)
+                    .navigationSplitViewColumnWidth(min: 520, ideal: 720)
+            } else {
+                TaskListView(selectedTask: $selectedTask, isSearchVisible: $isSearchVisible)
+                    .navigationSplitViewColumnWidth(min: 360, ideal: 520)
+            }
         } detail: {
             TaskDetailView(task: selectedTask)
                 .navigationSplitViewColumnWidth(min: 320, ideal: 380)
@@ -33,14 +46,17 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 360)
+                .disabled(contentMode == .calendar)
 
                 Button {
                     Task { await store.sync() }
                 } label: {
                     Label("Sincronizar", systemImage: "arrow.clockwise")
                 }
+                .help("Sincronizar com Google Tasks")
 
                 Button {
+                    contentMode = .taskList
                     isSearchVisible.toggle()
                     if !isSearchVisible {
                         store.searchText = ""
@@ -48,6 +64,44 @@ struct ContentView: View {
                 } label: {
                     Label("Buscar", systemImage: "magnifyingglass")
                 }
+                .disabled(contentMode == .calendar)
+                .help("Buscar tarefas na lista atual")
+
+                Button {
+                    contentMode = contentMode == .calendar ? .taskList : .calendar
+                    if contentMode == .calendar {
+                        isSearchVisible = false
+                        store.searchText = ""
+                    }
+                } label: {
+                    Label(contentMode == .calendar ? "Lista" : "Calendario", systemImage: contentMode == .calendar ? "list.bullet" : "calendar")
+                }
+                .help(contentMode == .calendar ? "Voltar para a lista de tarefas" : "Abrir calendario de prazos")
+
+                Menu {
+                    Button("Exportar todas como Markdown") {
+                        exportTasks(listIDs: Set(store.orderedLists.map(\.id)), format: .markdown)
+                    }
+                    Button("Exportar todas como JSON") {
+                        exportTasks(listIDs: Set(store.orderedLists.map(\.id)), format: .json)
+                    }
+                    Divider()
+                    Button("Exportar lista atual como Markdown") {
+                        exportTasks(listIDs: selectedExportListIDs, format: .markdown)
+                    }
+                    .disabled(store.selectedList == nil)
+                    Button("Exportar lista atual como JSON") {
+                        exportTasks(listIDs: selectedExportListIDs, format: .json)
+                    }
+                    .disabled(store.selectedList == nil)
+                    Divider()
+                    Button("Importar JSON") {
+                        importTasks()
+                    }
+                } label: {
+                    Label("Exportar e importar", systemImage: "square.and.arrow.up")
+                }
+                .help("Exportar ou importar tarefas")
 
                 Picker("Exibicao", selection: Binding(
                     get: { presence.mode },
@@ -66,6 +120,7 @@ struct ContentView: View {
                     } label: {
                         Label("Sair", systemImage: "rectangle.portrait.and.arrow.right")
                     }
+                    .help("Sair da conta Google")
                 } else {
                     Button {
                         Task {
@@ -79,6 +134,7 @@ struct ContentView: View {
                     } label: {
                         Label("Entrar", systemImage: "person.crop.circle.badge.checkmark")
                     }
+                    .help("Entrar com Google")
                 }
             }
         }
@@ -145,12 +201,48 @@ struct ContentView: View {
         guard oauth.isAuthenticated else { return }
         Task { await store.sync() }
     }
+
+    private var selectedExportListIDs: Set<String> {
+        if let selectedList = store.selectedList {
+            return [selectedList.id]
+        }
+        return []
+    }
+
+    private func exportTasks(listIDs: Set<String>, format: ExportFormat) {
+        do {
+            let text = try store.exportWorkspace(listIDs: listIDs, format: format)
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [format == .json ? .json : (UTType(filenameExtension: "md") ?? .plainText)]
+            panel.nameFieldStringValue = format == .json ? "google-tasks-export.json" : "google-tasks-export.md"
+            if panel.runModal() == .OK, let url = panel.url {
+                try text.data(using: .utf8)?.write(to: url)
+            }
+        } catch {
+            store.lastError = error.localizedDescription
+        }
+    }
+
+    private func importTasks() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let data = try Data(contentsOf: url)
+                Task { await store.importWorkspace(from: data) }
+            } catch {
+                store.lastError = error.localizedDescription
+            }
+        }
+    }
 }
 
 private struct SidebarView: View {
     @EnvironmentObject private var store: AppStore
     @State private var renamingList: GoogleTaskList?
     @State private var listPendingDeletion: GoogleTaskList?
+    @State private var hiddenListsExpanded = true
     @State private var newTitle = ""
 
     var body: some View {
@@ -186,12 +278,23 @@ private struct SidebarView: View {
             }
 
             if !store.hiddenListIDs.isEmpty {
-                Section("Ocultas") {
-                    ForEach(store.orderedLists.filter { store.hiddenListIDs.contains($0.id) }) { list in
-                        Button {
-                            store.toggleListHidden(list)
-                        } label: {
-                            Label(list.title, systemImage: "eye.slash")
+                Section {
+                    DisclosureGroup(isExpanded: $hiddenListsExpanded) {
+                        ForEach(store.orderedLists.filter { store.hiddenListIDs.contains($0.id) }) { list in
+                            Button {
+                                store.toggleListHidden(list)
+                            } label: {
+                                Label(list.title, systemImage: "eye.slash")
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Label("Ocultas", systemImage: "eye.slash")
+                            Spacer()
+                            Text("\(store.hiddenListIDs.count)")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
                         }
                     }
                 }
@@ -255,6 +358,336 @@ private struct DeleteListMenuButton: View {
         Button("Excluir", role: .destructive) {
             listPendingDeletion = list
         }
+    }
+}
+
+private struct CalendarView: View {
+    @EnvironmentObject private var store: AppStore
+    @Binding var selectedTask: GoogleTask?
+    @State private var displayedMonth = Calendar.current.monthStart(for: Date())
+    @State private var selectedDate = Calendar.current.startOfDay(for: Date())
+    @State private var selectedListIDs: Set<String> = []
+    @State private var listSelectionInitialized = false
+    @State private var showCompleted = true
+
+    private var calendar: Calendar {
+        Calendar.current
+    }
+
+    private var summaries: [DueTaskSummary] {
+        store.dueTaskSummaries(selectedListIDs: selectedListIDs, showCompleted: showCompleted)
+    }
+
+    private var summariesByDay: [Date: [DueTaskSummary]] {
+        Dictionary(grouping: summaries) { summary in
+            summary.task.due?.dueCalendarDay ?? .distantPast
+        }
+    }
+
+    private var selectedDaySummaries: [DueTaskSummary] {
+        summariesByDay[selectedDate] ?? []
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            calendarFilters
+                .frame(width: 190)
+                .background(.bar)
+
+            Divider()
+
+            VStack(spacing: 0) {
+                calendarHeader
+                    .padding()
+
+                monthGrid
+                    .padding(.horizontal)
+
+                Divider()
+                    .padding(.top, 12)
+
+                agenda
+            }
+        }
+        .onAppear {
+            initializeListSelectionIfNeeded()
+        }
+        .onChange(of: store.calendarLists.map(\.id)) { _, _ in
+            reconcileListSelection()
+        }
+    }
+
+    private var calendarFilters: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Calendario")
+                .font(.headline)
+
+            Button {
+                if allListsSelected {
+                    selectedListIDs = []
+                } else {
+                    selectedListIDs = Set(store.calendarLists.map(\.id))
+                }
+                listSelectionInitialized = true
+            } label: {
+                Label("Todas as listas", systemImage: allListsIconName)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .help("Marcar ou desmarcar todas as listas")
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(store.calendarLists) { list in
+                        Toggle(isOn: Binding(
+                            get: { selectedListIDs.contains(list.id) },
+                            set: { isOn in
+                                if isOn {
+                                    selectedListIDs.insert(list.id)
+                                } else {
+                                    selectedListIDs.remove(list.id)
+                                }
+                                listSelectionInitialized = true
+                            }
+                        )) {
+                            Text(list.title)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            Toggle("Mostrar concluidas", isOn: $showCompleted)
+
+            Spacer()
+            StatusBarView()
+        }
+        .padding(12)
+    }
+
+    private var calendarHeader: some View {
+        HStack {
+            Text(monthTitle)
+                .font(.title2.weight(.semibold))
+            Spacer()
+            Button {
+                moveMonth(by: -1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            Button("Hoje") {
+                selectedDate = calendar.startOfDay(for: Date())
+                displayedMonth = calendar.monthStart(for: selectedDate)
+            }
+            Button {
+                moveMonth(by: 1)
+            } label: {
+                Image(systemName: "chevron.right")
+            }
+        }
+    }
+
+    private var monthGrid: some View {
+        let days = calendarDays
+        return Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+            GridRow {
+                ForEach(weekdaySymbols, id: \.self) { symbol in
+                    Text(symbol)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            ForEach(0..<6, id: \.self) { row in
+                GridRow {
+                    ForEach(0..<7, id: \.self) { column in
+                        dayCell(days[row * 7 + column])
+                    }
+                }
+            }
+        }
+    }
+
+    private func dayCell(_ date: Date) -> some View {
+        let day = calendar.startOfDay(for: date)
+        let isSelected = calendar.isDate(day, inSameDayAs: selectedDate)
+        let isToday = calendar.isDateInToday(day)
+        let isDisplayedMonth = calendar.isDate(day, equalTo: displayedMonth, toGranularity: .month)
+        let daySummaries = summariesByDay[day] ?? []
+
+        return Button {
+            selectedDate = day
+        } label: {
+            VStack(spacing: 6) {
+                Text("\(calendar.component(.day, from: day))")
+                    .font(.body.weight(isToday ? .semibold : .regular))
+                    .foregroundStyle(isDisplayedMonth ? .primary : .tertiary)
+
+                if daySummaries.isEmpty {
+                    Circle()
+                        .fill(.clear)
+                        .frame(width: 6, height: 6)
+                } else {
+                    Text("\(daySummaries.count)")
+                        .font(.caption2.weight(.semibold))
+                        .monospacedDigit()
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.blue.opacity(0.16), in: Capsule())
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 58)
+            .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                if isToday {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor.opacity(0.65), lineWidth: 1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var agenda: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(selectedDate.formatted(date: .complete, time: .omitted))
+                    .font(.headline)
+                Spacer()
+                Text("\(selectedDaySummaries.count)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding()
+
+            if selectedDaySummaries.isEmpty {
+                ContentUnavailableView("Sem tarefas com prazo", systemImage: "calendar")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selectedDaySummaries, selection: Binding(
+                    get: { selectedTask.map { "\($0.id)" } },
+                    set: { id in
+                        selectedTask = selectedDaySummaries.first { $0.task.id == id }?.task
+                    }
+                )) { summary in
+                    CalendarTaskRow(summary: summary)
+                        .tag(Optional(summary.task.id))
+                }
+            }
+        }
+    }
+
+    private var calendarDays: [Date] {
+        guard let monthInterval = calendar.dateInterval(of: .month, for: displayedMonth),
+              let firstWeek = calendar.dateInterval(of: .weekOfMonth, for: monthInterval.start)
+        else { return [] }
+
+        return (0..<42).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset, to: firstWeek.start)
+        }
+    }
+
+    private var weekdaySymbols: [String] {
+        let symbols = calendar.shortStandaloneWeekdaySymbols
+        let first = calendar.firstWeekday - 1
+        return Array(symbols[first...] + symbols[..<first])
+    }
+
+    private var monthTitle: String {
+        displayedMonth.formatted(Date.FormatStyle().month(.wide).year())
+    }
+
+    private func moveMonth(by value: Int) {
+        displayedMonth = calendar.monthStart(for: calendar.date(byAdding: .month, value: value, to: displayedMonth) ?? displayedMonth)
+    }
+}
+
+private extension Calendar {
+    func monthStart(for date: Date) -> Date {
+        dateInterval(of: .month, for: date)?.start ?? startOfDay(for: date)
+    }
+}
+
+private extension CalendarView {
+    var allListsSelected: Bool {
+        !store.calendarLists.isEmpty && selectedListIDs == Set(store.calendarLists.map(\.id))
+    }
+
+    var noListsSelected: Bool {
+        selectedListIDs.isEmpty
+    }
+
+    var allListsIconName: String {
+        if allListsSelected {
+            return "checkmark.square"
+        }
+        if noListsSelected {
+            return "square"
+        }
+        return "minus.square"
+    }
+
+    func initializeListSelectionIfNeeded() {
+        guard !listSelectionInitialized else { return }
+        selectedListIDs = Set(store.calendarLists.map(\.id))
+        listSelectionInitialized = true
+    }
+
+    func reconcileListSelection() {
+        let ids = Set(store.calendarLists.map(\.id))
+        selectedListIDs = selectedListIDs.intersection(ids)
+        if !listSelectionInitialized {
+            selectedListIDs = ids
+            listSelectionInitialized = true
+        }
+    }
+}
+
+private extension Date {
+    var dueCalendarDay: Date {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = utcCalendar.dateComponents([.year, .month, .day], from: self)
+        return Calendar.current.date(from: DateComponents(
+            year: components.year,
+            month: components.month,
+            day: components.day
+        )) ?? Calendar.current.startOfDay(for: self)
+    }
+
+    var localDateForDueDatePicker: Date {
+        dueCalendarDay
+    }
+
+    var formattedDueDate: String {
+        dueCalendarDay.formatted(date: .abbreviated, time: .omitted)
+    }
+}
+
+private struct CalendarTaskRow: View {
+    var summary: DueTaskSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(summary.task.title.isEmpty ? "Sem titulo" : summary.task.title)
+                .strikethrough(summary.task.isCompleted)
+                .foregroundStyle(summary.task.isCompleted ? .secondary : .primary)
+            HStack(spacing: 8) {
+                Label(summary.listTitle, systemImage: "list.bullet")
+                if summary.task.isCompleted {
+                    Label("Concluida", systemImage: "checkmark.circle")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -493,14 +926,18 @@ private struct TaskRow: View {
                         .lineLimit(2)
                 }
                 if let due = task.due {
-                    Label(due.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                    Label(due.formattedDueDate, systemImage: "calendar")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let completed = task.completed {
                     Label("Concluida \(completed.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -545,9 +982,13 @@ private struct TaskDetailView: View {
                         }
                     }
                     if hasDue {
-                        HStack {
+                        VStack(alignment: .leading, spacing: 4) {
                             DatePicker("Prazo", selection: $due, displayedComponents: .date)
-                            Spacer()
+                            if let originalDue = task.due {
+                                Text("Atual: \(originalDue.formattedDueDate)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     if let completed = task.completed {
@@ -591,7 +1032,7 @@ private struct TaskDetailView: View {
     private func load(_ task: GoogleTask) {
         title = task.title
         notes = task.notes ?? ""
-        due = task.due ?? Date()
+        due = task.due?.localDateForDueDatePicker ?? Date()
         hasDue = task.due != nil
     }
 

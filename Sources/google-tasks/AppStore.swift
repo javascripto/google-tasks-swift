@@ -47,8 +47,37 @@ final class AppStore: ObservableObject {
         return tasks(in: selectedList, filter: filter, searchText: searchText)
     }
 
+    var calendarLists: [GoogleTaskList] {
+        orderedLists
+    }
+
     func pendingTaskCount(in list: GoogleTaskList) -> Int {
         tasks(in: list, filter: .active, searchText: "").count
+    }
+
+    func dueTaskSummaries(selectedListIDs: Set<String>, showCompleted: Bool) -> [DueTaskSummary] {
+        let listIDs = selectedListIDs
+        return calendarLists
+            .filter { listIDs.contains($0.id) }
+            .flatMap { list in
+                (tasksByListID[list.id] ?? [])
+                    .filter { task in
+                        task.due != nil
+                            && !(task.deleted ?? false)
+                            && (showCompleted || !task.isCompleted)
+                    }
+                    .map { task in
+                        DueTaskSummary(task: task, listID: list.id, listTitle: list.title)
+                    }
+            }
+            .sorted { lhs, rhs in
+                let leftDue = lhs.task.due ?? .distantFuture
+                let rightDue = rhs.task.due ?? .distantFuture
+                if leftDue == rightDue {
+                    return lhs.task.title.localizedCaseInsensitiveCompare(rhs.task.title) == .orderedAscending
+                }
+                return leftDue < rightDue
+            }
     }
 
     func loadCache() {
@@ -176,14 +205,63 @@ final class AppStore: ObservableObject {
             if clearDue {
                 payload["due"] = .null
             } else if let due {
-                payload["due"] = .string(ISO8601DateFormatter().string(from: due))
+                payload["due"] = .string(Self.googleDueDateString(from: due))
             } else if let taskDue = task.due {
-                payload["due"] = .string(ISO8601DateFormatter().string(from: taskDue))
+                payload["due"] = .string(Self.googleDueDateStringPreservingGoogleDate(from: taskDue))
             }
 
             let updated = try await api.patchTask(task.id, in: listID, payload: payload)
             replaceTask(updated, in: listID)
             try persist()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func exportWorkspace(listIDs: Set<String>, format: ExportFormat) throws -> String {
+        let selectedIDs = listIDs.isEmpty ? Set(orderedLists.map(\.id)) : listIDs
+        let exportedLists = orderedLists
+            .filter { selectedIDs.contains($0.id) }
+            .map { list in
+                ExportedTaskList(
+                    id: list.id,
+                    title: list.title,
+                    tasks: hierarchicalTasks(tasksByListID[list.id] ?? [])
+                        .filter { !($0.deleted ?? false) }
+                        .map(ExportedTask.init)
+                )
+            }
+        let export = ExportedWorkspace(exportedAt: Date(), lists: exportedLists)
+
+        switch format {
+        case .json:
+            let encoder = JSONEncoder.googleTasks
+            return String(data: try encoder.encode(export), encoding: .utf8) ?? "{}"
+        case .markdown:
+            return export.markdown
+        }
+    }
+
+    func importWorkspace(from data: Data) async {
+        do {
+            let exported = try JSONDecoder.googleTasks.decode(ExportedWorkspace.self, from: data)
+            for exportedList in exported.lists {
+                let remoteList = try await api.insertTaskList(title: exportedList.title)
+                lists.append(remoteList)
+                listOrder.append(remoteList.id)
+                for task in exportedList.tasks where task.parentID == nil {
+                    let remoteTask = try await api.insertTask(in: remoteList.id, title: task.title)
+                    let patched = try await api.patchTask(remoteTask.id, in: remoteList.id, payload: task.patchPayload)
+                    replaceTask(patched, in: remoteList.id)
+                    for child in exportedList.tasks.filter({ $0.parentID == task.id }) {
+                        let remoteChild = try await api.insertTask(in: remoteList.id, title: child.title, parent: patched.id)
+                        let patchedChild = try await api.patchTask(remoteChild.id, in: remoteList.id, payload: child.patchPayload)
+                        replaceTask(patchedChild, in: remoteList.id)
+                    }
+                }
+            }
+            try persist()
+            await sync()
         } catch {
             lastError = error.localizedDescription
         }
@@ -349,6 +427,38 @@ final class AppStore: ObservableObject {
 
         return result
     }
+
+    private static func googleDueDateString(from date: Date) -> String {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let localComponents = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        let utcDate = utcCalendar.date(from: DateComponents(
+            timeZone: utcCalendar.timeZone,
+            year: localComponents.year,
+            month: localComponents.month,
+            day: localComponents.day,
+            hour: 0,
+            minute: 0,
+            second: 0
+        )) ?? date
+        return ISO8601DateFormatter().string(from: utcDate)
+    }
+
+    private static func googleDueDateStringPreservingGoogleDate(from date: Date) -> String {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = utcCalendar.dateComponents([.year, .month, .day], from: date)
+        let utcDate = utcCalendar.date(from: DateComponents(
+            timeZone: utcCalendar.timeZone,
+            year: components.year,
+            month: components.month,
+            day: components.day,
+            hour: 0,
+            minute: 0,
+            second: 0
+        )) ?? date
+        return ISO8601DateFormatter().string(from: utcDate)
+    }
 }
 
 private extension GoogleTask {
@@ -361,4 +471,143 @@ struct MenuTaskSummary: Identifiable {
     var id: String { "\(listTitle)-\(title)" }
     var title: String
     var listTitle: String
+}
+
+struct DueTaskSummary: Identifiable, Equatable {
+    var task: GoogleTask
+    var listID: String
+    var listTitle: String
+
+    var id: String {
+        "\(listID)-\(task.id)"
+    }
+}
+
+enum ExportFormat {
+    case json
+    case markdown
+}
+
+struct ExportedWorkspace: Codable {
+    var exportedAt: Date
+    var lists: [ExportedTaskList]
+
+    var markdown: String {
+        var lines = [
+            "# Google Tasks Export",
+            "",
+            "Exportado em: \(exportedAt.formatted(date: .abbreviated, time: .shortened))",
+            ""
+        ]
+        for list in lists {
+            lines.append("## \(list.title)")
+            lines.append("")
+            if list.tasks.isEmpty {
+                lines.append("_Sem tarefas._")
+                lines.append("")
+                continue
+            }
+            for task in list.tasks {
+                let status = task.status == .completed ? "x" : " "
+                lines.append("- [\(status)] \(task.title)")
+                if let due = task.due {
+                    lines.append("  - Prazo: \(due.exportedDueDate)")
+                }
+                if let completed = task.completed {
+                    lines.append("  - Conclusao: \(completed.formatted(date: .abbreviated, time: .shortened))")
+                }
+                if let notes = task.notes, !notes.isEmpty {
+                    lines.append("  - Notas: \(notes.replacingOccurrences(of: "\n", with: " "))")
+                }
+            }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+struct ExportedTaskList: Codable {
+    var id: String
+    var title: String
+    var tasks: [ExportedTask]
+}
+
+struct ExportedTask: Codable {
+    var id: String
+    var parentID: String?
+    var title: String
+    var notes: String?
+    var status: TaskStatus
+    var due: Date?
+    var completed: Date?
+
+    init(_ task: GoogleTask) {
+        id = task.id
+        parentID = task.parent
+        title = task.title
+        notes = task.notes
+        status = task.status
+        due = task.due
+        completed = task.completed
+    }
+
+    var patchPayload: [String: GoogleTasksPatchValue] {
+        var payload: [String: GoogleTasksPatchValue] = [
+            "title": .string(title),
+            "notes": .string(notes ?? ""),
+            "status": .string(status.rawValue)
+        ]
+        if let due {
+            payload["due"] = .string(AppStore.googleDueDateStringForImportedGoogleDate(from: due))
+        }
+        return payload
+    }
+}
+
+extension AppStore {
+    nonisolated static func googleDueDateStringForExport(from date: Date) -> String {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let localComponents = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        let utcDate = utcCalendar.date(from: DateComponents(
+            timeZone: utcCalendar.timeZone,
+            year: localComponents.year,
+            month: localComponents.month,
+            day: localComponents.day,
+            hour: 0,
+            minute: 0,
+            second: 0
+        )) ?? date
+        return ISO8601DateFormatter().string(from: utcDate)
+    }
+
+    nonisolated static func googleDueDateStringForImportedGoogleDate(from date: Date) -> String {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = utcCalendar.dateComponents([.year, .month, .day], from: date)
+        let utcDate = utcCalendar.date(from: DateComponents(
+            timeZone: utcCalendar.timeZone,
+            year: components.year,
+            month: components.month,
+            day: components.day,
+            hour: 0,
+            minute: 0,
+            second: 0
+        )) ?? date
+        return ISO8601DateFormatter().string(from: utcDate)
+    }
+}
+
+private extension Date {
+    var exportedDueDate: String {
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let components = utcCalendar.dateComponents([.year, .month, .day], from: self)
+        let localDate = Calendar.current.date(from: DateComponents(
+            year: components.year,
+            month: components.month,
+            day: components.day
+        )) ?? self
+        return localDate.formatted(date: .abbreviated, time: .omitted)
+    }
 }
