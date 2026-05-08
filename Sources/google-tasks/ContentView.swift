@@ -34,7 +34,7 @@ struct ContentView: View {
                     .navigationSplitViewColumnWidth(min: 360, ideal: 520)
             }
         } detail: {
-            TaskDetailView(task: selectedTask)
+            TaskDetailView(task: selectedTask.flatMap { store.task(withID: $0.id) } ?? selectedTask)
                 .navigationSplitViewColumnWidth(min: 320, ideal: 380)
         }
         .toolbar {
@@ -577,7 +577,7 @@ private struct CalendarView: View {
                     }
                 )) { summary in
                     CalendarTaskRow(summary: summary)
-                        .tag(Optional(summary.task.id))
+                        .tag(summary.task.id)
                 }
             }
         }

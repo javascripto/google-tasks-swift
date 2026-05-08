@@ -55,6 +55,12 @@ final class AppStore: ObservableObject {
         tasks(in: list, filter: .active, searchText: "").count
     }
 
+    func task(withID taskID: String) -> GoogleTask? {
+        tasksByListID.values.lazy
+            .flatMap { $0 }
+            .first { $0.id == taskID }
+    }
+
     func dueTaskSummaries(selectedListIDs: Set<String>, showCompleted: Bool) -> [DueTaskSummary] {
         let listIDs = selectedListIDs
         return calendarLists
