@@ -10,6 +10,8 @@ Cliente macOS nativo para Google Tasks, feito em SwiftUI, com inicializacao rapi
 - Listas: criar, renomear, excluir com confirmacao, ocultar localmente e reordenar localmente.
 - Tarefas: criar, editar titulo inline, editar notas/data, concluir/reabrir e excluir com confirmacao.
 - Organizacao: buscar tarefas na lista atual, criar subtarefas, reordenar via `tasks.move` e mover tarefa para outra lista.
+- Calendario mensal com tarefas que possuem prazo, filtros por lista e opcao de mostrar/ocultar concluidas.
+- Exportacao em Markdown/JSON e importacao de JSON gerado pelo app.
 - Filtros: pendentes, todas e concluidas.
 - App no Dock, menu bar ou ambos, com lista compacta de pendentes na menu bar.
 - Icone colorido para o app e icone monocromatico/template para a menu bar.
