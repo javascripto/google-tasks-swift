@@ -497,6 +497,11 @@ private struct TaskRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if let completed = task.completed {
+                    Label("Concluida \(completed.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 8)
@@ -543,6 +548,12 @@ private struct TaskDetailView: View {
                         HStack {
                             DatePicker("Prazo", selection: $due, displayedComponents: .date)
                             Spacer()
+                        }
+                    }
+                    if let completed = task.completed {
+                        LabeledContent("Conclusao") {
+                            Text(completed.formatted(date: .abbreviated, time: .shortened))
+                                .foregroundStyle(.secondary)
                         }
                     }
                     Color.clear
