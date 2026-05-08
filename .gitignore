@@ -1,8 +1,17 @@
 .DS_Store
 /.build
+/build
+/dist
 /Packages
 xcuserdata/
 DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# Local secrets and development environment
+.env
+.env.*
+!.env.example
+client_secret*.json
+client_secret_*.json

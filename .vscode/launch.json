@@ -1,0 +1,64 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:google-tasks}",
+      "name": "Debug google-tasks",
+      "target": "google-tasks",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug google-tasks"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:google-tasks}",
+      "name": "Release google-tasks",
+      "target": "google-tasks",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release google-tasks"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:google-tasks}",
+      "name": "Debug google-tasks-selftest",
+      "target": "google-tasks-selftest",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug google-tasks-selftest"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:google-tasks}",
+      "name": "Release google-tasks-selftest",
+      "target": "google-tasks-selftest",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release google-tasks-selftest"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:google-tasks}",
+      "name": "Debug google-tasks-icon",
+      "target": "google-tasks-icon",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug google-tasks-icon"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:google-tasks}",
+      "name": "Release google-tasks-icon",
+      "target": "google-tasks-icon",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release google-tasks-icon"
+    }
+  ]
+}
