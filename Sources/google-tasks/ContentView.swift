@@ -529,9 +529,21 @@ private struct TaskDetailView: View {
                     TextField("Titulo", text: $title)
                     TextEditor(text: $notes)
                         .frame(minHeight: 120)
-                    Toggle("Data", isOn: $hasDue)
+                    HStack {
+                        Toggle("Prazo", isOn: $hasDue)
+                        Spacer()
+                        Button("Hoje") {
+                            setDue(daysFromToday: 0)
+                        }
+                        Button("Amanhã") {
+                            setDue(daysFromToday: 1)
+                        }
+                    }
                     if hasDue {
-                        DatePicker("Prazo", selection: $due, displayedComponents: .date)
+                        HStack {
+                            DatePicker("Prazo", selection: $due, displayedComponents: .date)
+                            Spacer()
+                        }
                     }
                     Color.clear
                         .frame(height: 20)
@@ -570,6 +582,11 @@ private struct TaskDetailView: View {
         notes = task.notes ?? ""
         due = task.due ?? Date()
         hasDue = task.due != nil
+    }
+
+    private func setDue(daysFromToday days: Int) {
+        hasDue = true
+        due = Calendar.current.date(byAdding: .day, value: days, to: Calendar.current.startOfDay(for: Date())) ?? Date()
     }
 }
 
