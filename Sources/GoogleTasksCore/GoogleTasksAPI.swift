@@ -33,6 +33,21 @@ public enum GoogleTasksAPIError: LocalizedError, Equatable {
     }
 }
 
+public enum GoogleTasksPatchValue: Encodable, Sendable {
+    case string(String)
+    case null
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case let .string(value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        }
+    }
+}
+
 public struct GoogleTasksAPI: Sendable {
     public var baseURL = URL(string: "https://tasks.googleapis.com")!
     public var transport: HTTPTransport
@@ -114,6 +129,10 @@ public struct GoogleTasksAPI: Sendable {
         return try await send(.patch, path: "/tasks/v1/lists/\(listID.urlPathEncoded)/tasks/\(taskID.urlPathEncoded)", body: body)
     }
 
+    public func patchTask(_ taskID: String, in listID: String, payload: [String: GoogleTasksPatchValue]) async throws -> GoogleTask {
+        try await send(.patch, path: "/tasks/v1/lists/\(listID.urlPathEncoded)/tasks/\(taskID.urlPathEncoded)", body: payload)
+    }
+
     public func setTaskCompleted(_ taskID: String, in listID: String, completed: Bool) async throws -> GoogleTask {
         try await patchTask(taskID, in: listID, payload: [
             "status": completed ? TaskStatus.completed.rawValue : TaskStatus.needsAction.rawValue
@@ -122,10 +141,6 @@ public struct GoogleTasksAPI: Sendable {
 
     public func deleteTask(_ taskID: String, in listID: String) async throws {
         let _: EmptyResponse = try await send(.delete, path: "/tasks/v1/lists/\(listID.urlPathEncoded)/tasks/\(taskID.urlPathEncoded)")
-    }
-
-    public func clearCompletedTasks(in listID: String) async throws {
-        let _: EmptyResponse = try await send(.post, path: "/tasks/v1/lists/\(listID.urlPathEncoded)/clear")
     }
 
     public func moveTask(_ taskID: String, from listID: String, parent: String? = nil, previous: String? = nil, destinationListID: String? = nil) async throws -> GoogleTask {

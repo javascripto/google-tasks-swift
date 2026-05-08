@@ -43,6 +43,11 @@ struct GoogleTasksApp: App {
                     Task { await store.createList() }
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Button("Sincronizar") {
+                    Task { await store.sync() }
+                }
+                .keyboardShortcut("r", modifiers: .command)
             }
 
             CommandMenu("Exibicao") {

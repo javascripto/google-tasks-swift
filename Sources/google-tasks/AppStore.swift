@@ -10,6 +10,7 @@ final class AppStore: ObservableObject {
     @Published var hiddenListIDs: Set<String> = []
     @Published var listOrder: [String] = []
     @Published var filter: TaskFilter = .active
+    @Published var searchText = ""
     @Published var isSyncing = false
     @Published var lastSyncedAt: Date?
     @Published var lastError: String?
@@ -43,18 +44,11 @@ final class AppStore: ObservableObject {
 
     var selectedTasks: [GoogleTask] {
         guard let selectedList else { return [] }
-        return (tasksByListID[selectedList.id] ?? [])
-            .filter { task in
-                switch filter {
-                case .all:
-                    !(task.deleted ?? false)
-                case .active:
-                    task.status == .needsAction && !(task.deleted ?? false) && !(task.hidden ?? false)
-                case .completed:
-                    task.status == .completed && !(task.deleted ?? false)
-                }
-            }
-            .sorted { ($0.position ?? "") < ($1.position ?? "") }
+        return tasks(in: selectedList, filter: filter, searchText: searchText)
+    }
+
+    func pendingTaskCount(in list: GoogleTaskList) -> Int {
+        tasks(in: list, filter: .active, searchText: "").count
     }
 
     func loadCache() {
@@ -141,6 +135,14 @@ final class AppStore: ObservableObject {
         try? persist()
     }
 
+    func moveList(from source: IndexSet, to destination: Int) {
+        var visibleIDs = visibleLists.map(\.id)
+        visibleIDs.move(fromOffsets: source, toOffset: destination)
+        let hiddenIDs = orderedLists.map(\.id).filter { hiddenListIDs.contains($0) }
+        listOrder = visibleIDs + hiddenIDs
+        try? persist()
+    }
+
     func createTask(title: String = "Nova tarefa") async {
         guard let list = selectedList else { return }
         do {
@@ -152,15 +154,35 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func patchTask(_ task: GoogleTask, title: String? = nil, notes: String? = nil, due: Date? = nil) async {
-        guard let list = selectedList else { return }
+    func createSubtask(parent task: GoogleTask, title: String = "Nova subtarefa") async {
+        guard task.parent == nil, let listID = taskListID(containing: task) else { return }
         do {
-            let updated = try await api.patchTask(task.id, in: list.id, payload: [
-                "title": title ?? task.title,
-                "notes": notes ?? task.notes,
-                "due": due.map { ISO8601DateFormatter().string(from: $0) } ?? task.due.map { ISO8601DateFormatter().string(from: $0) }
-            ])
-            replaceTask(updated, in: list.id)
+            let subtask = try await api.insertTask(in: listID, title: title, parent: task.id)
+            tasksByListID[listID, default: []].append(subtask)
+            try persist()
+            await sync()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func patchTask(_ task: GoogleTask, title: String? = nil, notes: String? = nil, due: Date? = nil, clearDue: Bool = false) async {
+        guard let listID = taskListID(containing: task) else { return }
+        do {
+            var payload: [String: GoogleTasksPatchValue] = [
+                "title": .string(title ?? task.title),
+                "notes": .string(notes ?? task.notes ?? "")
+            ]
+            if clearDue {
+                payload["due"] = .null
+            } else if let due {
+                payload["due"] = .string(ISO8601DateFormatter().string(from: due))
+            } else if let taskDue = task.due {
+                payload["due"] = .string(ISO8601DateFormatter().string(from: taskDue))
+            }
+
+            let updated = try await api.patchTask(task.id, in: listID, payload: payload)
+            replaceTask(updated, in: listID)
             try persist()
         } catch {
             lastError = error.localizedDescription
@@ -168,10 +190,10 @@ final class AppStore: ObservableObject {
     }
 
     func setCompleted(_ task: GoogleTask, completed: Bool) async {
-        guard let list = selectedList else { return }
+        guard let listID = taskListID(containing: task) else { return }
         do {
-            let updated = try await api.setTaskCompleted(task.id, in: list.id, completed: completed)
-            replaceTask(updated, in: list.id)
+            let updated = try await api.setTaskCompleted(task.id, in: listID, completed: completed)
+            replaceTask(updated, in: listID)
             try persist()
         } catch {
             lastError = error.localizedDescription
@@ -179,10 +201,10 @@ final class AppStore: ObservableObject {
     }
 
     func deleteTask(_ task: GoogleTask) async {
-        guard let list = selectedList else { return }
+        guard let listID = taskListID(containing: task) else { return }
         do {
-            try await api.deleteTask(task.id, in: list.id)
-            tasksByListID[list.id]?.removeAll { $0.id == task.id }
+            try await api.deleteTask(task.id, in: listID)
+            tasksByListID[listID]?.removeAll { $0.id == task.id }
             try persist()
         } catch {
             lastError = error.localizedDescription
@@ -190,14 +212,37 @@ final class AppStore: ObservableObject {
     }
 
     func moveTask(_ task: GoogleTask, after previousTask: GoogleTask?) async {
-        guard let list = selectedList else { return }
+        guard let listID = taskListID(containing: task) else { return }
         do {
-            let updated = try await api.moveTask(task.id, from: list.id, previous: previousTask?.id)
-            replaceTask(updated, in: list.id)
+            let previous = task.parent == nil ? previousTask?.topLevelTaskID : previousTask?.id
+            let updated = try await api.moveTask(task.id, from: listID, previous: previous)
+            replaceTask(updated, in: listID)
             await sync()
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    func moveTask(_ task: GoogleTask, to destinationList: GoogleTaskList) async {
+        guard let sourceListID = taskListID(containing: task), sourceListID != destinationList.id else { return }
+        do {
+            let updated = try await api.moveTask(task.id, from: sourceListID, destinationListID: destinationList.id)
+            tasksByListID[sourceListID]?.removeAll { $0.id == task.id }
+            replaceTask(updated, in: destinationList.id)
+            try persist()
+            await sync()
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func menuTaskSummaries(limit: Int = 6) -> [MenuTaskSummary] {
+        orderedLists.flatMap { list in
+            tasks(in: list, filter: .active, searchText: "")
+                .map { MenuTaskSummary(title: $0.title, listTitle: list.title) }
+        }
+        .prefix(limit)
+        .map { $0 }
     }
 
     private func apply(_ workspace: CachedWorkspace) {
@@ -248,4 +293,72 @@ final class AppStore: ObservableObject {
             tasksByListID[listID, default: []].append(task)
         }
     }
+
+    private func taskListID(containing task: GoogleTask) -> String? {
+        tasksByListID.first { _, tasks in
+            tasks.contains { $0.id == task.id }
+        }?.key
+    }
+
+    private func tasks(in list: GoogleTaskList, filter: TaskFilter, searchText: String) -> [GoogleTask] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filteredTasks = (tasksByListID[list.id] ?? [])
+            .filter { task in
+                switch filter {
+                case .all:
+                    !(task.deleted ?? false)
+                case .active:
+                    task.status == .needsAction && !(task.deleted ?? false) && !(task.hidden ?? false)
+                case .completed:
+                    task.status == .completed && !(task.deleted ?? false)
+                }
+            }
+
+        return hierarchicalTasks(filteredTasks)
+            .filter { task in
+                guard !query.isEmpty else { return true }
+                return task.title.localizedCaseInsensitiveContains(query)
+                    || (task.notes?.localizedCaseInsensitiveContains(query) ?? false)
+            }
+    }
+
+    private func hierarchicalTasks(_ tasks: [GoogleTask]) -> [GoogleTask] {
+        let byParent = Dictionary(grouping: tasks) { $0.parent }
+            .mapValues { children in
+                children.sorted { ($0.position ?? "") < ($1.position ?? "") }
+            }
+        var visited = Set<String>()
+        var result: [GoogleTask] = []
+
+        func appendTask(_ task: GoogleTask) {
+            guard !visited.contains(task.id) else { return }
+            visited.insert(task.id)
+            result.append(task)
+            for child in byParent[task.id] ?? [] {
+                appendTask(child)
+            }
+        }
+
+        for task in byParent[nil] ?? [] {
+            appendTask(task)
+        }
+
+        for task in tasks.sorted(by: { ($0.position ?? "") < ($1.position ?? "") }) where !visited.contains(task.id) {
+            appendTask(task)
+        }
+
+        return result
+    }
+}
+
+private extension GoogleTask {
+    var topLevelTaskID: String? {
+        parent == nil ? id : nil
+    }
+}
+
+struct MenuTaskSummary: Identifiable {
+    var id: String { "\(listTitle)-\(title)" }
+    var title: String
+    var listTitle: String
 }

@@ -11,13 +11,14 @@ struct ContentView: View {
     @State private var selectedTask: GoogleTask?
     @State private var pollingTask: Task<Void, Never>?
     @State private var isConfirmingSignOut = false
+    @State private var isSearchVisible = false
 
     var body: some View {
         NavigationSplitView {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } content: {
-            TaskListView(selectedTask: $selectedTask)
+            TaskListView(selectedTask: $selectedTask, isSearchVisible: $isSearchVisible)
                 .navigationSplitViewColumnWidth(min: 360, ideal: 520)
         } detail: {
             TaskDetailView(task: selectedTask)
@@ -37,6 +38,15 @@ struct ContentView: View {
                     Task { await store.sync() }
                 } label: {
                     Label("Sincronizar", systemImage: "arrow.clockwise")
+                }
+
+                Button {
+                    isSearchVisible.toggle()
+                    if !isSearchVisible {
+                        store.searchText = ""
+                    }
+                } label: {
+                    Label("Buscar", systemImage: "magnifyingglass")
                 }
 
                 Picker("Exibicao", selection: Binding(
@@ -147,7 +157,17 @@ private struct SidebarView: View {
         List(selection: $store.selectedListID) {
             Section("Listas") {
                 ForEach(store.visibleLists) { list in
-                    Label(list.title, systemImage: "list.bullet")
+                    HStack(spacing: 8) {
+                        Label(list.title, systemImage: "list.bullet")
+                        Spacer(minLength: 8)
+                        let count = store.pendingTaskCount(in: list)
+                        if count > 0 {
+                            Text("\(count)")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
                         .tag(Optional(list.id))
                         .contextMenu {
                             Button("Renomear") {
@@ -159,6 +179,9 @@ private struct SidebarView: View {
                             }
                             DeleteListMenuButton(list: list, listPendingDeletion: $listPendingDeletion)
                         }
+                }
+                .onMove { source, destination in
+                    store.moveList(from: source, to: destination)
                 }
             }
 
@@ -238,8 +261,12 @@ private struct DeleteListMenuButton: View {
 private struct TaskListView: View {
     @EnvironmentObject private var store: AppStore
     @Binding var selectedTask: GoogleTask?
+    @Binding var isSearchVisible: Bool
     @State private var draftTitle = ""
     @State private var taskPendingDeletion: GoogleTask?
+    @State private var taskPendingSubtask: GoogleTask?
+    @State private var subtaskTitle = ""
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -254,6 +281,31 @@ private struct TaskListView: View {
             }
             .padding()
 
+            if isSearchVisible {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Buscar tarefas", text: $store.searchText)
+                        .textFieldStyle(.plain)
+                        .focused($isSearchFocused)
+                    if !store.searchText.isEmpty {
+                        Button {
+                            store.searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+                .onAppear { isSearchFocused = true }
+            }
+
             HStack {
                 TextField("Nova tarefa", text: $draftTitle)
                     .textFieldStyle(.roundedBorder)
@@ -267,28 +319,53 @@ private struct TaskListView: View {
             .padding(.horizontal)
             .padding(.bottom, 10)
 
-            List(selection: Binding(
-                get: { selectedTask?.id },
-                set: { id in selectedTask = store.selectedTasks.first { $0.id == id } }
-            )) {
-                ForEach(store.selectedTasks) { task in
-                    TaskRow(task: task)
-                        .tag(Optional(task.id))
-                        .contextMenu {
-                            Button(task.isCompleted ? "Reabrir" : "Concluir") {
-                                Task { await store.setCompleted(task, completed: !task.isCompleted) }
+            if store.selectedList == nil {
+                ContentUnavailableView("Nenhuma lista", systemImage: "list.bullet", description: Text("Crie uma lista para comecar."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if store.selectedTasks.isEmpty {
+                ContentUnavailableView(emptyTitle, systemImage: "checklist", description: Text(emptyMessage))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: Binding(
+                    get: { selectedTask?.id },
+                    set: { id in selectedTask = store.selectedTasks.first { $0.id == id } }
+                )) {
+                    ForEach(store.selectedTasks) { task in
+                        TaskRow(task: task)
+                            .tag(Optional(task.id))
+                            .contextMenu {
+                                Button(task.isCompleted ? "Reabrir" : "Concluir") {
+                                    Task { await store.setCompleted(task, completed: !task.isCompleted) }
+                                }
+                                if task.parent == nil {
+                                    Button("Nova subtarefa") {
+                                        taskPendingSubtask = task
+                                        subtaskTitle = ""
+                                    }
+                                }
+                                if store.visibleLists.count > 1 {
+                                    Menu("Mover para") {
+                                        ForEach(store.visibleLists.filter { $0.id != store.selectedList?.id }) { list in
+                                            Button(list.title) {
+                                                Task { await store.moveTask(task, to: list) }
+                                            }
+                                        }
+                                    }
+                                }
+                                Button("Excluir", role: .destructive) {
+                                    taskPendingDeletion = task
+                                }
                             }
-                            Button("Excluir", role: .destructive) {
-                                taskPendingDeletion = task
-                            }
-                        }
+                    }
+                    .onMove(perform: moveTasks)
+
+                    Color.clear
+                        .frame(height: 18)
+                        .listRowSeparator(.hidden)
                 }
-                Color.clear
-                    .frame(height: 18)
-                    .listRowSeparator(.hidden)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                StatusBarView()
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    StatusBarView()
+                }
             }
         }
         .alert("Excluir tarefa?", isPresented: Binding(
@@ -311,6 +388,29 @@ private struct TaskListView: View {
             let title = taskPendingDeletion?.title ?? ""
             Text("A tarefa \"\(title.isEmpty ? "Sem titulo" : title)\" sera removida do Google Tasks.")
         }
+        .alert("Nova subtarefa", isPresented: Binding(
+            get: { taskPendingSubtask != nil },
+            set: { if !$0 { taskPendingSubtask = nil } }
+        )) {
+            TextField("Titulo", text: $subtaskTitle)
+            Button("Criar") {
+                let title = subtaskTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let taskPendingSubtask, !title.isEmpty {
+                    Task { await store.createSubtask(parent: taskPendingSubtask, title: title) }
+                }
+                taskPendingSubtask = nil
+            }
+            Button("Cancelar", role: .cancel) {
+                taskPendingSubtask = nil
+            }
+        } message: {
+            Text("A subtarefa sera criada abaixo da tarefa selecionada.")
+        }
+        .onChange(of: isSearchVisible) { _, visible in
+            if visible {
+                isSearchFocused = true
+            }
+        }
     }
 
     private func createTask() {
@@ -319,11 +419,46 @@ private struct TaskListView: View {
         draftTitle = ""
         Task { await store.createTask(title: title) }
     }
+
+    private func moveTasks(from source: IndexSet, to destination: Int) {
+        guard let sourceIndex = source.first else { return }
+        var tasks = store.selectedTasks
+        guard sourceIndex < tasks.count else { return }
+        let moved = tasks.remove(at: sourceIndex)
+        let insertionIndex = min(destination > sourceIndex ? destination - 1 : destination, tasks.count)
+        tasks.insert(moved, at: insertionIndex)
+        let previousTask = insertionIndex > 0 ? tasks[insertionIndex - 1] : nil
+        Task { await store.moveTask(moved, after: previousTask) }
+    }
+
+    private var emptyTitle: String {
+        if !store.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Nada encontrado"
+        }
+        switch store.filter {
+        case .all: return "Nenhuma tarefa"
+        case .active: return "Sem tarefas pendentes"
+        case .completed: return "Sem tarefas concluidas"
+        }
+    }
+
+    private var emptyMessage: String {
+        if !store.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "A busca nao encontrou titulo ou detalhes nesta lista."
+        }
+        switch store.filter {
+        case .all: return "Adicione uma tarefa acima."
+        case .active: return "Tudo em dia nesta lista."
+        case .completed: return "Tarefas concluidas aparecerao aqui."
+        }
+    }
 }
 
 private struct TaskRow: View {
     @EnvironmentObject private var store: AppStore
     var task: GoogleTask
+    @State private var title = ""
+    @FocusState private var isEditingTitle: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -335,9 +470,22 @@ private struct TaskRow: View {
             .buttonStyle(.plain)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(task.title.isEmpty ? "Sem titulo" : task.title)
+                TextField("Titulo", text: $title)
                     .strikethrough(task.isCompleted)
                     .foregroundStyle(task.isCompleted ? .secondary : .primary)
+                    .textFieldStyle(.plain)
+                    .focused($isEditingTitle)
+                    .onSubmit { saveTitle() }
+                    .onChange(of: isEditingTitle) { _, focused in
+                        if !focused {
+                            saveTitle()
+                        }
+                    }
+                if task.parent != nil {
+                    Label("Subtarefa", systemImage: "arrow.turn.down.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let notes = task.notes, !notes.isEmpty {
                     Text(notes)
                         .font(.caption)
@@ -354,6 +502,15 @@ private struct TaskRow: View {
             Spacer(minLength: 8)
         }
         .padding(.vertical, 4)
+        .padding(.leading, task.parent == nil ? 0 : 22)
+        .onAppear { title = task.title }
+        .onChange(of: task.title) { _, newValue in title = newValue }
+    }
+
+    private func saveTitle() {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanTitle != task.title else { return }
+        Task { await store.patchTask(task, title: cleanTitle.isEmpty ? "Sem titulo" : cleanTitle) }
     }
 }
 
@@ -384,7 +541,7 @@ private struct TaskDetailView: View {
                     VStack(spacing: 0) {
                         Button {
                             Task {
-                                await store.patchTask(task, title: title, notes: notes, due: hasDue ? due : nil)
+                                await store.patchTask(task, title: title, notes: notes, due: hasDue ? due : nil, clearDue: !hasDue)
                             }
                         } label: {
                             Label("Salvar", systemImage: "checkmark")
