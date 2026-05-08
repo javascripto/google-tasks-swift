@@ -18,7 +18,7 @@ enum AppPresenceMode: String, CaseIterable, Identifiable {
 }
 
 @MainActor
-final class AppPresenceController: NSObject, ObservableObject, NSApplicationDelegate {
+final class AppPresenceController: NSObject, ObservableObject, NSApplicationDelegate, NSMenuDelegate {
     @Published var mode: AppPresenceMode {
         didSet {
             UserDefaults.standard.set(mode.rawValue, forKey: Self.modeKey)
@@ -110,6 +110,24 @@ final class AppPresenceController: NSObject, ObservableObject, NSApplicationDele
         menu.addItem(NSMenuItem(title: "Abrir Google Tasks", action: #selector(openFromMenu), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Sincronizar", action: #selector(syncFromMenu), keyEquivalent: ""))
         menu.addItem(.separator())
+
+        let summaries = store?.menuTaskSummaries() ?? []
+        if summaries.isEmpty {
+            let emptyItem = NSMenuItem(title: "Nenhuma tarefa pendente", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
+        } else {
+            let header = NSMenuItem(title: "Pendentes", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for summary in summaries {
+                let title = summary.title.isEmpty ? "Sem titulo" : summary.title
+                let item = NSMenuItem(title: "\(title) - \(summary.listTitle)", action: #selector(openFromMenu), keyEquivalent: "")
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Mostrar no Dock", action: #selector(showDockOnly), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Mostrar na menu bar", action: #selector(showMenuBarOnly), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Mostrar em ambos", action: #selector(showBoth), keyEquivalent: ""))
@@ -119,12 +137,17 @@ final class AppPresenceController: NSObject, ObservableObject, NSApplicationDele
         for item in menu.items {
             item.target = self
         }
+        menu.delegate = self
 
         menu.item(withTitle: "Mostrar no Dock")?.state = mode == .dock ? .on : .off
         menu.item(withTitle: "Mostrar na menu bar")?.state = mode == .menuBar ? .on : .off
         menu.item(withTitle: "Mostrar em ambos")?.state = mode == .both ? .on : .off
 
         statusItem.menu = menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        rebuildStatusMenu()
     }
 
     @objc private func statusButtonClicked() {
